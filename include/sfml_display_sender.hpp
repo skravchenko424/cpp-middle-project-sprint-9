@@ -4,6 +4,10 @@
 
 #include <stdexec/execution.hpp>
 
+#include <print>
+
+namespace ex = stdexec;
+
 namespace render {
 
 static auto MakeSfmlDisplaySender(SfmlState &st) {

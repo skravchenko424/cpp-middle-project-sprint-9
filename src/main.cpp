@@ -7,7 +7,7 @@
 #include <SFML/Graphics.hpp>
 
 #include <exec/any_sender_of.hpp>
-#include <exec/repeat_effect_until.hpp>
+#include <exec/repeat_until.hpp>
 #include <exec/static_thread_pool.hpp>
 #include <stdexec/execution.hpp>
 
@@ -21,11 +21,11 @@ namespace ex = stdexec;
 
 class WaitForFPS {
 public:
-    static constexpr float TARGET_FPS = 60.0f;
-    static constexpr float FRAME_TIME_MS = 1000.0f / TARGET_FPS;
+    static constexpr unsigned int TARGET_FPS = 60;
 
-    explicit WaitForFPS(FrameClock &frame_clock, unsigned int target_fps)
-        : frame_clock_(frame_clock), frame_time_(1s / target_fps) {}
+    explicit WaitForFPS(FrameClock &frame_clock, unsigned int target_fps = TARGET_FPS)
+        : frame_clock_(frame_clock), frame_time_(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::duration<double>(1.0 / static_cast<double>(target_fps)))) {}
 
     void operator()() {
         auto cur_frame_duration = frame_clock_.GetFrameTime();
@@ -59,10 +59,26 @@ public:
                    }));
         ex::sync_wait(std::move(initialize));
 
-        auto process_frame = ex::just(); // Ваш код здесь
+        using process_frame_sender_type = exec::any_sender<exec::any_receiver<
+            ex::completion_signatures<ex::set_value_t(), ex::set_error_t(std::exception_ptr), ex::set_stopped_t()>>>;
+
+        auto process_frame =
+            ex::starts_on(sfml_sched, SfmlEventHandler{state_->window, state_->render_settings, state_->app_state}) |
+            ex::let_value([this, compute_sched, sfml_sched]() -> process_frame_sender_type {
+                if (!state_->app_state.need_rerender) {
+                    return ex::just();
+                }
+
+                return ex::starts_on(compute_sched, ex::just(&state_->fb) |
+                                                        mandelbrot::MakeComputeSender(state_->render_settings,
+                                                                                      state_->app_state.viewport)) |
+                       ex::continues_on(sfml_sched) | render::MakeSfmlDisplaySender(*state_);
+            }) |
+            ex::then([this]() { state_->app_state.need_rerender = false; }) |
+            ex::then(WaitForFPS{state_->frame_clock, WaitForFPS::TARGET_FPS});
 
         auto repeated_pipeline = std::move(process_frame) | ex::then([this] { return state_->app_state.should_exit; }) |
-                                 exec::repeat_effect_until();
+                                 exec::repeat_until();
         ex::sync_wait(std::move(repeated_pipeline));
     }
 
